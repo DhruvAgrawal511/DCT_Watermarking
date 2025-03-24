@@ -4,6 +4,7 @@ import random
 import math
 
 def psnr(img1, img2):
+    """Computes the Peak Signal-to-Noise Ratio (PSNR)."""
     mse = np.mean((img1 - img2) ** 2)
     if mse == 0:
         return 100
@@ -11,15 +12,16 @@ def psnr(img1, img2):
     return 20 * math.log10(PIXEL_MAX / math.sqrt(mse))
 
 def ncc(img1, img2):
-    """Computes the Normalized Cross-Correlation (NCC) between two images."""
+    """Computes Normalized Cross-Correlation (NCC) between two images."""
     img1 = img1.astype(np.float32)
     img2 = img2.astype(np.float32)
-    return abs(np.mean(np.multiply((img1 - np.mean(img1)), (img2 - np.mean(img2)))) / (np.std(img1) * np.std(img2)))
+    return abs(np.mean((img1 - np.mean(img1)) * (img2 - np.mean(img2))) / (np.std(img1) * np.std(img2)))
 
-def embed_watermark(image_path, watermark_path, output_path, alpha=0.5):
+def embed_watermark(image_path, watermark_path, output_path, alpha=0.02):
+    """Embeds a watermark into an image using weighted addition."""
     image = cv2.imread(image_path)
     watermark = cv2.imread(watermark_path, cv2.IMREAD_UNCHANGED)
-    
+
     if image is None or watermark is None:
         print("Error: Could not read images.")
         return None
@@ -33,13 +35,17 @@ def embed_watermark(image_path, watermark_path, output_path, alpha=0.5):
     cv2.imwrite(output_path, watermarked_image)
     return watermarked_image
 
-def extract_watermark(watermarked_path, original_path, output_path, alpha=0.5):
+def extract_watermark(watermarked_path, original_path, output_path, alpha=0.02):
+    """Extracts the watermark by reversing the embedding process."""
     watermarked_image = cv2.imread(watermarked_path)
     original_image = cv2.imread(original_path)
 
     if watermarked_image is None or original_image is None:
         print("Error: Could not read watermarked or original images.")
         return None
+
+    # Resize original image to match watermarked image (if necessary)
+    original_image = cv2.resize(original_image, (watermarked_image.shape[1], watermarked_image.shape[0]))
 
     watermark = (watermarked_image - original_image * (1 - alpha)) / alpha
     watermark = np.clip(watermark, 0, 255).astype(np.uint8)
@@ -48,47 +54,50 @@ def extract_watermark(watermarked_path, original_path, output_path, alpha=0.5):
     return watermark
 
 def preprocess_for_ncc(original_wm, extracted_wm):
-    """Ensures both images have the same size and are grayscale."""
+    """Ensures both images are grayscale and of the same size before NCC calculation."""
     extracted_wm = cv2.resize(extracted_wm, (original_wm.shape[1], original_wm.shape[0]))
     if len(extracted_wm.shape) == 3:
         extracted_wm = cv2.cvtColor(extracted_wm, cv2.COLOR_BGR2GRAY)
     return extracted_wm
 
-def scaling_half(img):
-    return cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
+# ATTACKS / DISTORTIONS
 
-def scaling_bigger(img):
-    return cv2.resize(img, (1100, 1100))
+def scaling_half(img, original_size):
+    return cv2.resize(img, (original_size[1], original_size[0]), fx=0.5, fy=0.5)
 
-def cut_100_rows(img):
-    return img[50:-50, :]
+def scaling_bigger(img, original_size):
+    return cv2.resize(img, (original_size[1], original_size[0]), fx=1.5, fy=1.5)
 
-def average_filter(img):
+def cut_100_rows(img, original_size):
+    cropped = img[50:-50, :]
+    return cv2.resize(cropped, (original_size[1], original_size[0]))
+
+def average_filter(img, original_size):
     kernel = np.ones((5,5), np.float32) / 25
     return cv2.filter2D(img, -1, kernel)
 
-def median_filter(img):
+def median_filter(img, original_size):
     return cv2.medianBlur(img, 5)
 
-def add_noise(img, noise_type):
+def add_noise(img, original_size, noise_type):
+    """Adds noise to an image and ensures pixel values remain in the valid range."""
+    noisy_img = img.copy()
     if noise_type == "gauss":
-        noise = np.random.normal(0, 25, img.shape).astype(np.uint8)
-        return cv2.add(img, noise)
+        noise = np.random.normal(0, 25, img.shape).astype(np.int16)
+        noisy_img = np.clip(img + noise, 0, 255).astype(np.uint8)
     elif noise_type == "s&p":
         prob = 0.05
-        output = img.copy()
-        thres = 1 - prob
         for i in range(img.shape[0]):
             for j in range(img.shape[1]):
                 rdn = random.random()
                 if rdn < prob:
-                    output[i][j] = 0
-                elif rdn > thres:
-                    output[i][j] = 255
-        return output
-    return img
+                    noisy_img[i][j] = 0
+                elif rdn > (1 - prob):
+                    noisy_img[i][j] = 255
+    return noisy_img
 
 def run_watermarking():
+    """Runs the complete watermark embedding, extraction, and attack evaluation pipeline."""
     image_path = input("Enter the path of the main image: ")
     watermark_path = input("Enter the path of the watermark image: ")
     watermarked_output = "watermarked.jpg"
@@ -111,20 +120,24 @@ def run_watermarking():
         print("Error: Could not read original watermark.")
         return
 
-    psnr_value = psnr(cv2.imread(image_path), watermarked_img)
+    original_image = cv2.imread(image_path)
+    psnr_value = psnr(original_image, watermarked_img)
     print("PSNR between original and watermarked image:", psnr_value)
 
     extracted_wm = preprocess_for_ncc(original_wm, extracted_wm)
     print("NCC between original and extracted watermark:", ncc(original_wm, extracted_wm))
 
+    original_size = original_image.shape[:2]
+
+    # ATTACKS
     attacks = {
-        "Scaling Half": scaling_half(watermarked_img),
-        "Scaling Bigger": scaling_bigger(watermarked_img),
-        "Cut 100 Rows": cut_100_rows(watermarked_img),
-        "Average Filter": average_filter(watermarked_img),
-        "Median Filter": median_filter(watermarked_img),
-        "Gaussian Noise": add_noise(watermarked_img, "gauss"),
-        "Salt & Pepper Noise": add_noise(watermarked_img, "s&p")
+        "Scaling Half": scaling_half(watermarked_img, original_size),
+        "Scaling Bigger": scaling_bigger(watermarked_img, original_size),
+        "Cut 100 Rows": cut_100_rows(watermarked_img, original_size),
+        "Average Filter": average_filter(watermarked_img, original_size),
+        "Median Filter": median_filter(watermarked_img, original_size),
+        "Gaussian Noise": add_noise(watermarked_img, original_size, "gauss"),
+        "Salt & Pepper Noise": add_noise(watermarked_img, original_size, "s&p")
     }
 
     for attack_name, attacked_img in attacks.items():

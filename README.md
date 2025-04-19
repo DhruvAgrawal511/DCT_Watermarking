@@ -36,7 +36,7 @@ pip install opencv-python numpy
 To run the program:
 
 ```bash
-python watermarking.py
+python StegoDCT.py
 ```
 
 You will be prompted to enter:
